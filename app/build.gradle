@@ -46,6 +46,7 @@ dependencies {
 
     // https://mvnrepository.com/artifact/com.amazonaws/aws-android-sdk-iot
     implementation("com.amazonaws:aws-android-sdk-iot:2.73.0")
+    implementation 'com.amazonaws:aws-android-sdk-mobile-client:2.73.0'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

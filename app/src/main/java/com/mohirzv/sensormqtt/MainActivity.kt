@@ -6,36 +6,31 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.util.Log
-import com.google.android.material.snackbar.Snackbar
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
-import androidx.navigation.findNavController
-import androidx.navigation.ui.AppBarConfiguration
-import androidx.navigation.ui.navigateUp
-import androidx.navigation.ui.setupActionBarWithNavController
-import android.view.Menu
-import android.view.MenuItem
-import android.widget.Toast
-import androidx.core.content.ContextCompat
-import com.amazonaws.auth.CognitoCachingCredentialsProvider
-import com.amazonaws.auth.CognitoCredentialsProvider
 import com.amazonaws.mobileconnectors.iot.AWSIotMqttClientStatusCallback
-import com.amazonaws.mobileconnectors.iot.AWSIotMqttLastWillAndTestament
 import com.amazonaws.mobileconnectors.iot.AWSIotMqttManager
 import com.amazonaws.mobileconnectors.iot.AWSIotMqttQos
-import com.amazonaws.regions.Region
 import com.amazonaws.regions.Regions
-import com.amazonaws.services.iot.AWSIotClient
+import com.google.gson.Gson
 import com.mohirzv.sensormqtt.databinding.ActivityMainBinding
-import java.lang.Exception
+import java.security.KeyFactory
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.cert.Certificate
+import java.security.cert.CertificateFactory
+import java.security.spec.PKCS8EncodedKeySpec
+import java.util.Timer
+import java.util.TimerTask
 import java.util.UUID
+
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -46,19 +41,43 @@ class MainActivity : AppCompatActivity() {
     private var gyroscope: Sensor? = null
     private var magnetometer: Sensor? = null
     private lateinit var locationManager: LocationManager
-
+    val gson = Gson()
+    // interval between mqtt messages
+    private val interval = 50 //ms
+    // object to store all sensor data as they arrive
+    private var sensorData = SensorData(
+        SensorAxis(0f, 0f, 0f),
+        SensorAxis(0f, 0f, 0f),
+        SensorAxis(0f, 0f, 0f),
+        GpsCoords(0.0, 0.0)
+    )
     companion object {
-        const val COGNITO_POOL_ID = "eu-north-1:<REPLACE_WITH_REAL_ID>"
-        const val CUSTOMER_SPECIFIC_ENDPOINT = "<REPLACE_WITH_REAL_ID>.iot.eu-north-1.amazonaws.com"
+        // get from https://eu-north-1.console.aws.amazon.com/iot/home?region=eu-north-1#/settings
+        const val CUSTOMER_SPECIFIC_ENDPOINT = "a1epn6oate0yl-ats.iot.eu-north-1.amazonaws.com"
         const val TOPIC = "sensorData"
         val MY_REGION = Regions.EU_NORTH_1
         const val TAG = "Mohi"
         const val REQUEST_PERMISSIONS_CODE = 7777
     }
 
+    private val timer = Timer()
+
+    // Schedule a task to run at a fixed interval
+    private val timerTask = object : TimerTask() {
+        override fun run() {
+            if (mqttConnected) {
+                // in case gps data was not yet retrieved by the device, don't publish
+                if (sensorData.gps.lat != 0.0) {
+                    val data = gson.toJson(sensorData)
+                    mqttManager.publishString(data, TOPIC, AWSIotMqttQos.QOS0)
+                }
+            }
+        }
+    }
+
     private val sensorListener = object : SensorEventListener {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-            // Not used in this example
+            // Not used in this app
         }
 
         override fun onSensorChanged(event: SensorEvent?) {
@@ -67,28 +86,22 @@ class MainActivity : AppCompatActivity() {
                     val x = event.values[0]
                     val y = event.values[1]
                     val z = event.values[2]
+                    sensorData.accelerometer = SensorAxis(x, y, z)
                     binding.tvAcc.text = "$x, $y, $z"
-                    if (mqttConnected) {
-                        mqttManager.publishString("Acc, $x, $y, $z", TOPIC, AWSIotMqttQos.QOS0)
-                    }
                 }
                 Sensor.TYPE_GYROSCOPE -> {
                     val x = event.values[0]
                     val y = event.values[1]
                     val z = event.values[2]
+                    sensorData.gyroscope = SensorAxis(x, y, z)
                     binding.tvGyro.text = "$x, $y, $z"
-                    if (mqttConnected) {
-                        mqttManager.publishString("Gyro, $x, $y, $z", TOPIC, AWSIotMqttQos.QOS0)
-                    }
                 }
                 Sensor.TYPE_MAGNETIC_FIELD -> {
                     val x = event.values[0]
                     val y = event.values[1]
                     val z = event.values[2]
+                    sensorData.magnetometer = SensorAxis(x, y, z)
                     binding.tvMagneto.text = "$x, $y, $z"
-                    if (mqttConnected) {
-                        mqttManager.publishString("Magneto, $x, $y, $z", TOPIC, AWSIotMqttQos.QOS0)
-                    }
                 }
                 else -> {}
             }
@@ -99,10 +112,8 @@ class MainActivity : AppCompatActivity() {
         val lat = it.latitude
         val lon = it.longitude
         val alt = it.altitude
+        sensorData.gps = GpsCoords(lat, lon)
         binding.tvGps.text = "$lat, $lon"
-        if (mqttConnected) {
-            mqttManager.publishString("GPS, $lat, $lon", TOPIC, AWSIotMqttQos.QOS0)
-        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -120,6 +131,7 @@ class MainActivity : AppCompatActivity() {
         checkAndRequestPermissions()
         setupSensors()
         setupMQTT()
+        timer.schedule(timerTask, 0, interval.toLong())
     }
 
     private fun setupMQTT() {
@@ -128,32 +140,27 @@ class MainActivity : AppCompatActivity() {
         // uniqueness.
         val clientId = UUID.randomUUID().toString()
 
-        val credentialsProvider = CognitoCachingCredentialsProvider(
-            applicationContext,
-            COGNITO_POOL_ID,
-            MY_REGION
-        )
+        val keystore = setupCredentials()
 
         mqttManager = AWSIotMqttManager(clientId, CUSTOMER_SPECIFIC_ENDPOINT)
-        mqttManager.keepAlive = 10
+        mqttManager.keepAlive = 30
 
         try {
-            mqttManager.connect(credentialsProvider, AWSIotMqttClientStatusCallback {
+            mqttManager.connect(keystore, AWSIotMqttClientStatusCallback {
                     status, throwable ->
                 Log.d(TAG, "Status = $status")
                 when(status) {
                     AWSIotMqttClientStatusCallback.AWSIotMqttClientStatus.Connected -> {
-                        try {
-                            mqttManager.publishString("Test messg Android Mh", TOPIC, AWSIotMqttQos.QOS0)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Publish error: $e")
-                        }
                         mqttConnected = true
                     }
                     else -> {
                         mqttConnected = false
                     }
                 }
+                throwable?.let{
+                    Log.e(TAG, throwable.message.toString())
+                }
+
             }
             )
         } catch (e: Exception) {
@@ -161,13 +168,68 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // for this we need the certificate and private key for AWS IoT
+    // obtained when we create a certificate for a thing
+    // files are stored in res/raw
+    private fun setupCredentials(): KeyStore {
+        val alias = "keyawws"
+        try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore")
+            keyStore.load(null)
+
+            if (keyStore.containsAlias(alias)) {
+                return keyStore
+            }
+
+            val certificateInputStream = resources.openRawResource(R.raw.certificate)
+            val privateKeyInputStream = resources.openRawResource(R.raw.private_key)
+            val publicKeyInputStream = resources.openRawResource(R.raw.public_key)
+
+            val certificateFactory = CertificateFactory.getInstance("X.509")
+
+            // Load device certificate
+            val certificate: Certificate =
+                certificateFactory.generateCertificate(certificateInputStream)
+            keyStore.setCertificateEntry(alias, certificate)
+
+            // Load private key from PEM file
+            val privateKeyBytes: ByteArray = privateKeyInputStream.readBytes()
+            val privateKeyPEM = String(privateKeyBytes)
+                .replace("-----BEGIN RSA PRIVATE KEY-----", "")
+                .replace("-----END RSA PRIVATE KEY-----", "")
+                .replace("\n", "")
+                .trim()
+            Log.d("PEM Content", privateKeyPEM)
+            val keyFactory = KeyFactory.getInstance("RSA")
+            val keySpec = PKCS8EncodedKeySpec(android.util.Base64.decode(privateKeyPEM, android.util.Base64.DEFAULT))
+            val privateKey: PrivateKey = keyFactory.generatePrivate(keySpec)
+
+//            val publicKeyBytes: ByteArray = publicKeyInputStream.readBytes()
+//            val publicKeyPEM = String(publicKeyBytes)
+//                .replace("-----BEGIN PUBLIC KEY-----", "")
+//                .replace("-----END PUBLIC KEY-----", "")
+//                .replace("\n", "")
+//                .trim()
+//            Log.d("PEM Content", publicKeyPEM)
+//            val keyFactoryPublic = KeyFactory.getInstance("RSA")
+//            val keySpecPublic = RSAPublicKeySpec(Base64.decode(publicKeyPEM, Base64.DEFAULT))
+//            val publicKey: PublicKey = keyFactoryPublic.generatePublic(keySpecPublic)
+
+            keyStore.setKeyEntry(alias, privateKey, null, arrayOf(certificate))
+            return keyStore
+        } catch (e: Exception) {
+            // Handle exceptions appropriately
+            e.printStackTrace()
+            throw RuntimeException("Error setting up connection", e)
+        }
+    }
     private fun startListening() {
         try {
             // Request location updates with a minimum time interval and minimum distance change
             locationManager.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
-                1000, // 1 second
-                1f,   // 1 meter
+                100, // 100 ms
+                0.5f,   // 0.5 meters
                 locationListener
             )
         } catch (e: SecurityException) {
