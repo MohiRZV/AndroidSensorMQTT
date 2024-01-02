@@ -53,9 +53,9 @@ class MainActivity : AppCompatActivity() {
     )
     companion object {
         // get from https://eu-north-1.console.aws.amazon.com/iot/home?region=eu-north-1#/settings
-        const val CUSTOMER_SPECIFIC_ENDPOINT = "a1epn6oate0yl-ats.iot.eu-north-1.amazonaws.com"
+        const val CUSTOMER_SPECIFIC_ENDPOINT = "a1epn6oate0yl-ats.iot.eu-west-1.amazonaws.com"
         const val TOPIC = "sensorData"
-        val MY_REGION = Regions.EU_NORTH_1
+        val MY_REGION = Regions.EU_WEST_1
         const val TAG = "Mohi"
         const val REQUEST_PERMISSIONS_CODE = 7777
     }
