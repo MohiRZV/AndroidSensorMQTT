@@ -15,6 +15,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
+import ch.hsr.geohash.GeoHash
 import com.amazonaws.mobileconnectors.iot.AWSIotMqttClientStatusCallback
 import com.amazonaws.mobileconnectors.iot.AWSIotMqttManager
 import com.amazonaws.mobileconnectors.iot.AWSIotMqttQos
@@ -113,7 +114,10 @@ class MainActivity : AppCompatActivity() {
         val lon = it.longitude
         val alt = it.altitude
         sensorData.gps = GpsCoords(lat, lon)
-        binding.tvGps.text = "$lat, $lon"
+
+        val geohash = GeoHash.withCharacterPrecision(lat, lon, 9).toBase32()
+        sensorData.geohash = geohash
+        binding.tvGps.text = "$lat, $lon, Geohash: $geohash"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -172,7 +176,7 @@ class MainActivity : AppCompatActivity() {
     // obtained when we create a certificate for a thing
     // files are stored in res/raw
     private fun setupCredentials(): KeyStore {
-        val alias = "keyawws"
+        val alias = "awskeystorekey"
         try {
             val keyStore = KeyStore.getInstance("AndroidKeyStore")
             keyStore.load(null)
